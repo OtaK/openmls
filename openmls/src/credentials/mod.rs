@@ -36,9 +36,11 @@ use openmls_traits::{
 };
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
+use std::io::Write;
 #[cfg(test)]
 use tls_codec::Serialize as TlsSerializeTrait;
-use tls_codec::{TlsByteVecU16, TlsDeserialize, TlsSerialize, TlsSize};
+use tls_codec::{Error, TlsByteVecU16, TlsDeserialize, TlsSerialize, TlsSize, TlsVecU16};
+use x509_parser::prelude::{Logger, Validator, X509Certificate, X509StructureValidator};
 
 use crate::{ciphersuite::*, error::LibraryError};
 
@@ -81,9 +83,81 @@ impl TryFrom<u16> for CredentialType {
 ///
 /// This struct contains an X.509 certificate chain.  Note that X.509
 /// certificates are not yet supported by OpenMLS.
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, PartialEq, Clone, Serialize, Deserialize, TlsDeserialize, TlsSerialize, TlsSize,
+)]
 pub struct Certificate {
-    cert_data: Vec<u8>,
+    identity: TlsByteVecU16,
+    cert_chain: TlsVecU16<TlsByteVecU16>,
+}
+
+impl Certificate {
+    fn parse(&self) -> Result<Vec<X509Certificate>, CredentialError> {
+        self.cert_chain.iter().try_fold(
+            Vec::new(),
+            |mut acc, certificate| -> Result<Vec<X509Certificate>, CredentialError> {
+                acc.push(Self::parse_single(certificate)?);
+                Ok(acc)
+            },
+        )
+    }
+
+    fn parse_single(certificate: &TlsByteVecU16) -> Result<X509Certificate, CredentialError> {
+        x509_parser::parse_x509_certificate(certificate.as_slice())
+            .map(|(_, cert)| cert)
+            .map_err(CredentialError::from)
+    }
+
+    /// Is signed by issuer
+    fn is_verified(
+        certificate: &X509Certificate,
+        issuer: &X509Certificate,
+    ) -> Result<(), CredentialError> {
+        certificate
+            .verify_signature(Some(&issuer.subject_pki))
+            .map_err(|_| CredentialError::InvalidCertificateChain)
+    }
+
+    fn is_valid<'a>(
+        certificate: &'a X509Certificate,
+    ) -> Result<&'a X509Certificate<'a>, CredentialError> {
+        if Self::is_time_valid(certificate) && Self::is_structure_valid(certificate) {
+            Ok(certificate)
+        } else {
+            Err(CredentialError::InvalidCertificate)
+        }
+    }
+
+    fn is_structure_valid(certificate: &X509Certificate) -> bool {
+        // validates structure (fields etc..)
+        struct NoopLogger;
+        impl Logger for NoopLogger {
+            fn warn(&mut self, _: &str) {}
+            fn err(&mut self, _: &str) {}
+        }
+        X509StructureValidator.validate(certificate, &mut NoopLogger)
+    }
+
+    fn is_time_valid(certificate: &X509Certificate) -> bool {
+        // 'not_before' < now < 'not_after'
+        certificate.validity().is_valid()
+    }
+
+    fn signature_scheme(_certificate: &X509Certificate) -> SignatureScheme {
+        // TODO: (wire) implement x509 properly. Should be derived from issuer public key info
+        SignatureScheme::ED25519
+    }
+
+    fn public_key(certificate: &X509Certificate) -> Result<SignaturePublicKey, CredentialError> {
+        let public_key = &certificate.subject_pki.subject_public_key;
+        let signature_scheme = Self::signature_scheme(certificate);
+        SignaturePublicKey::new(public_key.data.to_vec(), signature_scheme)
+            .map_err(|_| CredentialError::IncompleteCertificate("subjectPublicKeyInfo".to_string()))
+    }
+
+    fn leaf_certificate(&self) -> &TlsByteVecU16 {
+        &self.cert_chain[0]
+    }
 }
 
 /// MlsCredentialType.
@@ -124,7 +198,37 @@ impl Credential {
                 .verify(backend, signature, payload)
                 .map_err(|_| CredentialError::InvalidSignature),
             // TODO: implement verification for X509 certificates. See issue #134.
-            MlsCredentialType::X509(_) => panic!("X509 certificates are not yet implemented."),
+            MlsCredentialType::X509(certificate_chain) => {
+                let certificates = certificate_chain.parse()?;
+                certificates
+                    .iter()
+                    .enumerate()
+                    .map(Ok)
+                    .reduce(
+                        |a, b| -> Result<(usize, &X509Certificate), CredentialError> {
+                            let (current_index, current) = a?;
+                            let (next_index, next) = b?;
+                            if current_index == 0 {
+                                // this is leaf certificate
+                                Certificate::public_key(current)?
+                                    // verify that payload is signed by leaf certificate
+                                    .verify(backend, signature, payload)
+                                    .map_err(|_| CredentialError::InvalidSignature)?;
+                            }
+                            // is valid in time + x509 structure (fields etc..)
+                            Certificate::is_valid(current)
+                                // verifies current signed by issuer
+                                .and(Certificate::is_verified(current, next))?;
+                            Ok((next_index, next))
+                        },
+                    )
+                    .ok_or_else(|| {
+                        CredentialError::LibraryError(LibraryError::custom(
+                            "Cannot have validated an empty certificate chain",
+                        ))
+                    })?
+                    .map(|_| ())
+            }
         }
     }
 
@@ -133,7 +237,10 @@ impl Credential {
         match &self.credential {
             MlsCredentialType::Basic(basic_credential) => basic_credential.identity.as_slice(),
             // TODO: implement getter for identity for X509 certificates. See issue #134.
-            MlsCredentialType::X509(_) => panic!("X509 certificates are not yet implemented."),
+            MlsCredentialType::X509(certificate_chain) => {
+                // TODO: (wire) implement x509 properly. Identity should be extracted from leaf certificate e.g. serial + subj alt name
+                certificate_chain.identity.as_slice()
+            }
         }
     }
 
@@ -141,15 +248,29 @@ impl Credential {
     pub fn signature_scheme(&self) -> SignatureScheme {
         match &self.credential {
             MlsCredentialType::Basic(basic_credential) => basic_credential.signature_scheme,
-            // TODO: implement getter for signature scheme for X509 certificates. See issue #134.
-            MlsCredentialType::X509(_) => panic!("X509 certificates are not yet implemented."),
+            MlsCredentialType::X509(certificate_chain) => {
+                // TODO: implement getter for signature scheme for X509 certificates. See issue #134.
+                // TODO: (wire) highly inefficient, parsing certificate twice to avoid propagating lifetime everywhere
+                let leaf = Certificate::parse_single(certificate_chain.leaf_certificate()).unwrap();
+                Certificate::signature_scheme(&leaf)
+            }
         }
     }
+
     /// Returns the public key contained in the credential.
     pub fn signature_key(&self) -> &SignaturePublicKey {
         match &self.credential {
             MlsCredentialType::Basic(basic_credential) => &basic_credential.public_key,
-            MlsCredentialType::X509(_) => panic!("X509 certificates are not yet implemented."),
+            MlsCredentialType::X509(certificates) => {
+                // TODO: (wire) implement x509 properly
+                let leaf = certificates.leaf_certificate();
+                // should be safe as we already have checked certificate beforehand
+                // TODO: (wire) highly inefficient, parsing certificate twice to avoid propagating lifetime everywhere
+                let leaf = Certificate::parse_single(leaf).unwrap();
+                let signature_key = Certificate::public_key(&leaf).unwrap();
+                // TODO: conscious memory leak
+                Box::leak(Box::new(signature_key))
+            }
         }
     }
 }
@@ -212,31 +333,50 @@ pub struct CredentialBundle {
 }
 
 impl CredentialBundle {
-    /// Creates and returns a new [`CredentialBundle`] of the given
-    /// [`CredentialType`] for the given identity and [`SignatureScheme`]. The
-    /// corresponding key material is freshly generated.
-    ///
-    /// Returns an error if the given [`CredentialType`] is not supported.
-    pub fn new(
+    /// Creates and returns a new basic [`CredentialBundle`] for the given identity and [`SignatureScheme`].
+    /// The corresponding key material is freshly generated.
+    pub fn new_basic(
         identity: Vec<u8>,
-        credential_type: CredentialType,
         signature_scheme: SignatureScheme,
         backend: &impl OpenMlsCryptoProvider,
     ) -> Result<Self, CredentialError> {
         let (private_key, public_key) = SignatureKeypair::new(signature_scheme, backend)
             .map_err(LibraryError::unexpected_crypto_error)?
             .into_tuple();
-        let mls_credential = match credential_type {
-            CredentialType::Basic => BasicCredential {
+        let credential = Credential {
+            credential_type: CredentialType::Basic,
+            credential: MlsCredentialType::Basic(BasicCredential {
                 identity: identity.into(),
                 signature_scheme,
                 public_key,
-            },
-            _ => return Err(CredentialError::UnsupportedCredentialType),
+            }),
         };
+        Ok(CredentialBundle {
+            credential,
+            signature_private_key: private_key,
+        })
+    }
+
+    /// Creates and returns a new x509 [`CredentialBundle`]
+    pub fn new_x509(
+        identity: Vec<u8>,
+        cert_chain: Vec<Vec<u8>>,
+        private_key: SignaturePrivateKey,
+    ) -> Result<Self, CredentialError> {
+        if cert_chain.len() < 2 {
+            return Err(CredentialError::IncompleteCertificateChain);
+        }
+        let cert_chain = cert_chain
+            .into_iter()
+            .map(|c| c.into())
+            .collect::<TlsVecU16<_>>();
         let credential = Credential {
-            credential_type,
-            credential: MlsCredentialType::Basic(mls_credential),
+            credential_type: CredentialType::X509,
+            // TODO: (wire) implement x509 properly. Identity should not be there and extracted from certificate instead
+            credential: MlsCredentialType::X509(Certificate {
+                identity: identity.into(),
+                cert_chain,
+            }),
         };
         Ok(CredentialBundle {
             credential,

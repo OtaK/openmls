@@ -6,9 +6,8 @@ use openmls_traits::{key_store::OpenMlsKeyStore, types::SignatureScheme};
 fn test_store_key_package_bundle(ciphersuite: Ciphersuite, backend: &impl OpenMlsCryptoProvider) {
     // ANCHOR: key_store_store
     // First we generate a credential and key package for our user.
-    let credential_bundle = CredentialBundle::new(
+    let credential_bundle = CredentialBundle::new_basic(
         b"User ID".to_vec(),
-        CredentialType::Basic,
         SignatureScheme::from(ciphersuite),
         backend,
     )
@@ -43,9 +42,8 @@ fn test_store_key_package_bundle(ciphersuite: Ciphersuite, backend: &impl OpenMl
 #[apply(ciphersuites_and_backends)]
 fn test_read_credential_bundle(ciphersuite: Ciphersuite, backend: &impl OpenMlsCryptoProvider) {
     // First we generate a credential bundle
-    let credential_bundle_to_store = CredentialBundle::new(
+    let credential_bundle_to_store = CredentialBundle::new_basic(
         b"User ID".to_vec(),
-        CredentialType::Basic,
         SignatureScheme::from(ciphersuite),
         backend,
     )

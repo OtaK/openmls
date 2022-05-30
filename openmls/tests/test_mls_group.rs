@@ -12,11 +12,10 @@ lazy_static! {
 
 fn generate_credential_bundle(
     identity: Vec<u8>,
-    credential_type: CredentialType,
     signature_algorithm: SignatureScheme,
     backend: &impl OpenMlsCryptoProvider,
 ) -> Result<Credential, CredentialError> {
-    let cb = CredentialBundle::new(identity, credential_type, signature_algorithm, backend)?;
+    let cb = CredentialBundle::new_basic(identity, signature_algorithm, backend)?;
     let credential = cb.credential().clone();
     backend
         .key_store()
@@ -82,7 +81,6 @@ fn mls_group_operations(ciphersuite: Ciphersuite, backend: &impl OpenMlsCryptoPr
         // Generate credential bundles
         let alice_credential = generate_credential_bundle(
             "Alice".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -90,7 +88,6 @@ fn mls_group_operations(ciphersuite: Ciphersuite, backend: &impl OpenMlsCryptoPr
 
         let bob_credential = generate_credential_bundle(
             "Bob".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -98,7 +95,6 @@ fn mls_group_operations(ciphersuite: Ciphersuite, backend: &impl OpenMlsCryptoPr
 
         let charlie_credential = generate_credential_bundle(
             "Charlie".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -923,7 +919,6 @@ fn test_empty_input_errors(ciphersuite: Ciphersuite, backend: &impl OpenMlsCrypt
     // Generate credential bundles
     let alice_credential = generate_credential_bundle(
         "Alice".into(),
-        CredentialType::Basic,
         ciphersuite.signature_algorithm(),
         backend,
     )
@@ -977,7 +972,6 @@ fn mls_group_ratchet_tree_extension(
         // Generate credential bundles
         let alice_credential = generate_credential_bundle(
             "Alice".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -985,7 +979,6 @@ fn mls_group_ratchet_tree_extension(
 
         let bob_credential = generate_credential_bundle(
             "Bob".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -1033,7 +1026,6 @@ fn mls_group_ratchet_tree_extension(
         // Generate credential bundles
         let alice_credential = generate_credential_bundle(
             "Alice".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )
@@ -1041,7 +1033,6 @@ fn mls_group_ratchet_tree_extension(
 
         let bob_credential = generate_credential_bundle(
             "Bob".into(),
-            CredentialType::Basic,
             ciphersuite.signature_algorithm(),
             backend,
         )

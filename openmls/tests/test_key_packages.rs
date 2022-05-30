@@ -7,9 +7,8 @@ fn key_package_generation(ciphersuite: Ciphersuite, backend: &impl OpenMlsCrypto
     println!("Testing ciphersuite {:?}", ciphersuite);
 
     let id = vec![1, 2, 3];
-    let credential_bundle = CredentialBundle::new(
+    let credential_bundle = CredentialBundle::new_basic(
         id,
-        CredentialType::Basic,
         ciphersuite.signature_algorithm(),
         backend,
     )

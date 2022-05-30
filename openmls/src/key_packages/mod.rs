@@ -34,9 +34,8 @@
 //! let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 //! let backend = OpenMlsRustCrypto::default();
 //!
-//! let credential_bundle = CredentialBundle::new(
-//!     b"Sasha".to_vec(),
-//!     CredentialType::Basic,
+//! let credential_bundle = CredentialBundle::new_basic(
+//!     b"Sasha".to_vec(),//!
 //!     SignatureScheme::from(ciphersuite),
 //!     &backend,
 //! )
